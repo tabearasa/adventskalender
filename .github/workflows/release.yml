@@ -1,0 +1,130 @@
+name: Release
+
+# Runs when a version tag such as v0.1.0 is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  BIN_NAME: snowman-catch
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Builds Linux and cross-compiles Windows on the same machine
+          - name: linux-windows-x86_64
+            os: ubuntu-latest
+          - name: macos-universal
+            os: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Determine version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: cargo test --locked
+
+      # ---------- Linux: .tar.gz  +  Windows: .exe (cross-compiled) ----------
+      - name: Install MinGW-w64 for the Windows cross build
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build and package (Linux + Windows)
+        if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          linux=x86_64-unknown-linux-gnu
+          windows=x86_64-pc-windows-gnu
+          rustup target add "$linux" "$windows"
+          cargo build --release --locked --target "$linux"
+          cargo build --release --locked --target "$windows"
+          mkdir -p dist
+
+          # Linux archive
+          pkg="$BIN_NAME-$VERSION-$linux"
+          mkdir -p "build/$pkg"
+          cp "target/$linux/release/$BIN_NAME" README.md "build/$pkg/"
+          tar -czf "dist/$pkg.tar.gz" -C build "$pkg"
+
+          # Windows binary
+          cp "target/$windows/release/$BIN_NAME.exe" "dist/$BIN_NAME-$VERSION-$windows.exe"
+
+      # ---------- macOS: universal .pkg installer + .tar.gz ----------
+      - name: Build and package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+          # One binary that runs on Apple Silicon and Intel Macs
+          mkdir -p build
+          lipo -create -output "build/$BIN_NAME" \
+            "target/aarch64-apple-darwin/release/$BIN_NAME" \
+            "target/x86_64-apple-darwin/release/$BIN_NAME"
+          lipo -info "build/$BIN_NAME"
+
+          pkg="$BIN_NAME-$VERSION-macos-universal"
+          mkdir -p dist
+
+          # Installer package: installs to /usr/local/bin/snowman-catch
+          mkdir -p pkgroot/bin
+          cp "build/$BIN_NAME" pkgroot/bin/
+          pkgbuild \
+            --root pkgroot \
+            --identifier "io.github.${GITHUB_REPOSITORY_OWNER}.${BIN_NAME}" \
+            --version "$VERSION" \
+            --install-location /usr/local \
+            "dist/$pkg.pkg"
+
+          # Plain archive for manual installation
+          mkdir -p "build/$pkg"
+          cp "build/$BIN_NAME" README.md "build/$pkg/"
+          tar -czf "dist/$pkg.tar.gz" -C build "$pkg"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
