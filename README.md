@@ -71,6 +71,17 @@ tests:
 cargo test
 ```
 
+## Release
+
+Pushing a version tag builds the Linux `.tar.gz`, the Windows `.exe` and the
+macOS `.pkg`/`.tar.gz` and attaches them to a GitHub release
+(see `.github/workflows/release.yml`):
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Project layout
 
 - `src/main.rs` – terminal setup, input handling and rendering (via
